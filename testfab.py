@@ -1,5 +1,6 @@
 import numpy as np
 from hmmlearn.hmm import MultinomialHMM
+from hmmlearn.fabhmm import MultinomialFABHMM
 
 
 def sample(n_samples):
@@ -41,12 +42,12 @@ def sample_rand(n_samples, n_components, n_features):
 
 
 def main():
-    N = 10
-    X, state_sequence = sample(n_samples=1000)
+    N = 1
+    X, state_sequence = sample(n_samples=500)
 
     acm = 0
     for _ in range(N):
-        model = MultinomialHMM(n_components=20, n_iter=10000, tol=1e-5)
+        model = MultinomialFABHMM(n_components=20, n_iter=10000, tol=1e-5)
         model.fit(X)
         acm += model.n_components
 
