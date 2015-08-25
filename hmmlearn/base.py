@@ -150,7 +150,8 @@ class _BaseHMM(BaseEstimator):
                  algorithm="viterbi", random_state=None,
                  n_iter=10, tol=1e-2, verbose=False,
                  params=string.ascii_letters,
-                 init_params=string.ascii_letters):
+                 init_params=string.ascii_letters,
+                 model_select=False):
         self.n_components = n_components
         self.params = params
         self.init_params = init_params
@@ -161,6 +162,7 @@ class _BaseHMM(BaseEstimator):
         self.n_iter = n_iter
         self.tol = tol
         self.verbose = verbose
+        self.model_select = model_select
 
     def score_samples(self, X, lengths=None):
         """Compute the log probability under the model and compute posteriors.
@@ -402,24 +404,84 @@ class _BaseHMM(BaseEstimator):
         self._check()
 
         self.monitor_ = ConvergenceMonitor(self.tol, self.n_iter, self.verbose)
+
+        n_samples = X.shape[0]
+        self.posteriors = np.ones((n_samples,
+                                  self.n_components)) / self.n_components
+
+        n_seqs = 1 if lengths is None else len(lengths)
+        l_logprob = []
+        l_ficlb = []
+        l_n_components = []
+        l_delta = []
+        l_bp = []
         for iter in range(self.n_iter):
             stats = self._initialize_sufficient_statistics()
-            curr_logprob = 0
+            ficlb = 0
+
+            shrinker, sh_reg = self._compute_shrinker(self.posteriors)
+
             for i, j in iter_from_X_lengths(X, lengths):
                 framelogprob = self._compute_log_likelihood(X[i:j])
-                logprob, fwdlattice = self._do_forward_pass(framelogprob)
-                curr_logprob += logprob
-                bwdlattice = self._do_backward_pass(framelogprob)
+                shrinked_framelogprob = \
+                    self._compute_shrinked_logprob(framelogprob, shrinker)
+                logprob, fwdlattice = \
+                    self._do_forward_pass(shrinked_framelogprob)
+                ficlb += logprob
+                l_logprob.append(logprob)
+                ficlb += sh_reg[1]
+                ficlb += sh_reg[0] * (j - i - 1)
+                l_delta.append(sh_reg[1] + sh_reg[0] * (j - i - 1))
+                bwdlattice = self._do_backward_pass(shrinked_framelogprob)
                 posteriors = self._compute_posteriors(fwdlattice, bwdlattice)
+                self.posteriors[i:j] = posteriors
+
                 self._accumulate_sufficient_statistics(
-                    stats, X[i:j], framelogprob, posteriors, fwdlattice,
+                    stats, X[i:j], shrinked_framelogprob,
+                    posteriors, fwdlattice,
                     bwdlattice, self.params)
 
-            self.monitor_.report(curr_logprob)
-            if self.monitor_.converged:
-                break
+            D_beta = self.n_components
+            D_phi = self.n_features
 
             self._do_mstep(stats, self.params)
+
+            count = self._eliminate_components()
+
+            ficlb -= D_beta / 2.0 * np.log(n_seqs)
+            sum_post_minus = np.sum(self.posteriors[:-1], axis=0)
+            sum_post = sum_post_minus + self.posteriors[-1]
+            term_beta = D_beta / 2.0 * (np.log(sum_post_minus) - 1)
+            term_phi = D_phi / 2.0 * (np.log(sum_post) - 1)
+            ficlb -= np.sum(term_beta + term_phi)
+
+            beta_phi = -np.sum(term_beta + term_phi)
+            l_bp.append(beta_phi)
+            l_ficlb.append(ficlb)
+
+            l_n_components.append(self.n_components)
+
+            self.monitor_.report(ficlb)
+            if self.monitor_.converged and count is 0:
+                import pylab as plt
+                a_ficlb = np.array(l_ficlb)
+                a_logprob = np.array(l_logprob)
+                a_n_components = np.array(l_n_components)
+                a_delta = np.array(l_delta)
+                a_bp = np.array(l_bp)
+                plt.subplot(2,2,1)
+                plt.plot(np.arange(a_ficlb.shape[0]), a_ficlb, label='ficlb')
+                plt.plot(np.arange(a_logprob.shape[0]), a_logprob, label='lobprob')
+                plt.legend(fontsize=8)
+                plt.subplot(2,2,2)
+                plt.plot(np.arange(a_delta.shape[0]), a_delta, label='delta')
+                plt.legend(fontsize=8)
+                plt.subplot(2,2,3)
+                plt.plot(np.arange(a_n_components.shape[0]), a_n_components)
+                plt.subplot(2,2,4)
+                plt.plot(np.arange(a_bp.shape[0]), a_bp)
+                plt.savefig('fig.png')
+                break
 
         return self
 
@@ -429,6 +491,56 @@ class _BaseHMM(BaseEstimator):
             n_observations, n_components, np.log(self.startprob_),
             np.log(self.transmat_), framelogprob)
         return logprob, state_sequence
+
+    def _compute_shrinker(self, posteriors):
+        n_samples, n_components = posteriors.shape
+        sum_post_minus = np.sum(posteriors[:-1], axis=0)
+        sum_post_minus[sum_post_minus == 0] = np.finfo(float).eps
+        sum_post = sum_post_minus + posteriors[-1]
+
+        term_beta = - n_components / (2 * sum_post_minus)
+        # n_components should be n_demension of emmision parameter
+        term_phi = - self.n_features / (2 * sum_post)
+
+        _logshrinker = np.zeros((2, self.n_components))
+        _logshrinker[0] = term_beta + term_phi
+        _logshrinker[1] = term_phi
+
+        reg = logsumexp(_logshrinker, axis=1)
+
+        logshrinker = _logshrinker - reg[:, np.newaxis]
+        return logshrinker, reg
+
+    def _compute_shrinked_logprob(self, framelogprob, logshrinker):
+        n_observations, n_components = framelogprob.shape
+
+        shrinked_logprob = np.zeros((n_observations, n_components))
+        shrinked_logprob[:-1] = \
+            framelogprob[:-1, :] + logshrinker[np.newaxis, 0]
+        shrinked_logprob[-1] = framelogprob[-1, :] + logshrinker[1]
+
+        return shrinked_logprob
+
+    def _eliminate_components(self):
+        pst = self.posteriors
+        pst[pst < 1e-5] = 0
+        sum_post = np.sum(pst, axis=0)
+        idx = sum_post > 1
+        count = np.count_nonzero(idx == 0)
+        self.n_components -= count
+        self.posteriors = self.posteriors[:, idx]
+        idx_2d = np.logical_and(idx[:, np.newaxis],
+                                idx[np.newaxis, :])
+        self.transmat_ = self.transmat_[idx_2d]\
+                             .reshape(self.n_components, self.n_components)
+        self.startprob_ = self.startprob_[idx]
+        self.emissionprob_ = self.emissionprob_[idx, :]\
+                                 .reshape(self.n_components, self.n_features)
+
+        normalize(self.startprob_)
+        normalize(self.startprob_)
+
+        return count
 
     def _do_forward_pass(self, framelogprob):
         n_observations, n_components = framelogprob.shape
