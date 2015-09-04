@@ -1,4 +1,4 @@
-# Hidden Markov Models
+# Factorized Asymptotic Bayesian Hidden Markov Models
 #
 # Author: Taikai Takeda <297.1951@gmail.com>
 

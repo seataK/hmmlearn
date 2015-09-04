@@ -50,6 +50,60 @@ def _forward(int n_observations, int n_components,
                 work_buffer[i] = fwdlattice[t - 1, i] + log_transmat[i, j]
             fwdlattice[t, j] = _logsumexp(work_buffer) + framelogprob[t, j]
 
+@cython.boundscheck(False)
+def _pair_forward(int n_observations, int n_components,
+        np.ndarray[dtype_t, ndim=1] log_startprob,
+        np.ndarray[dtype_t, ndim=2] log_transmat,
+        np.ndarray[dtype_t, ndim=2] framelogprob,
+        np.ndarray[dtype_t, ndim=2] fwdlattice,
+        np.ndarray[dtype_t, ndim=1] delta):
+
+    cdef int t, i, j, k
+    cdef np.ndarray[dtype_t, ndim=1] work_buffer
+    work_buffer = np.zeros(n_components)
+
+    for i in range(n_components):
+        fwdlattice[0, i] = log_startprob[i] + framelogprob[0, i]
+
+    # filling boundary nums preliinary is better for performacne
+
+    for t in range(1, n_observations):
+        for j in range(n_components):
+            k = t - delta[j]
+            for i in range(n_components):
+                if k < 0:
+                    work_buffer[i] = _NINF
+                else:
+                    work_buffer[i] = fwdlattice[t - delta[j], i] + log_transmat[i, j]
+            fwdlattice[t, j] = _logsumexp(work_buffer) + framelogprob[t, j]
+
+
+@cython.boundscheck(False)
+def _pair_backward(int n_observations, int n_components,
+        np.ndarray[dtype_t, ndim=1] log_startprob,
+        np.ndarray[dtype_t, ndim=2] log_transmat,
+        np.ndarray[dtype_t, ndim=2] framelogprob,
+        np.ndarray[dtype_t, ndim=2] bwdlattice,
+        np.ndarray[dtype_t, ndim=1] delta):):
+
+    cdef int t, i, j
+    cdef double logprob
+    cdef np.ndarray[dtype_t, ndim = 1] work_buffer
+    work_buffer = np.zeros(n_components)
+
+    for i in range(n_components):
+        bwdlattice[n_observations - 1, i] = 0.0
+
+    for t in range(n_observations - 2, -1, -1):
+        for i in range(n_components):
+            for j in range(n_components):
+                k = t + delta[j]
+                if k < n_observatinos:
+                    work_buffer[j] = log_transmat[i, j] + framelogprob[k, j] \
+                                     + bwdlattice[k, j]
+                else:
+                    work_buffer[j] = _NINF
+            bwdlattice[t, i] = _logsumexp(work_buffer)
 
 @cython.boundscheck(False)
 def _backward(int n_observations, int n_components,
@@ -72,7 +126,6 @@ def _backward(int n_observations, int n_components,
                 work_buffer[j] = log_transmat[i, j] + framelogprob[t + 1, j] \
                     + bwdlattice[t + 1, j]
             bwdlattice[t, i] = _logsumexp(work_buffer)
-
 
 @cython.boundscheck(False)
 def _compute_lneta(int n_observations, int n_components,
